@@ -2,6 +2,8 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
+from torch.optim import lr_scheduler
+from torch.nn import DataParallel
 import numpy as np
 import pandas as pd
 import math
@@ -13,11 +15,13 @@ import copy
 import sys
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2, 3, 4, 5"
 
 # writer = SummaryWriter("runs/train")
 
 # Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+# device_ids = [2, 3, 4, 5]
 
 # Hyper-parameters
 num_epochs = 2
@@ -29,25 +33,29 @@ learning_rate = 1e-3
 
 class TextDataset(Dataset):
 
-    def __init__(self, cluster_num):
+    def __init__(self, cluster_num, type):
 
         # Initialize, download data.
-        df_train = pd.read_csv(
-            'raw_data_clustered.csv')
-        df_train = df_train[df_train[df_train.columns[2]] == cluster_num]
-        self.n_samples = df_train.shape[0]
+        if type == 'train':
+            df = pd.read_csv(
+                '/home/lumenglin/shihanrui/cluster/train_data_clustered.csv')
+        elif type == 'test':
+            df = pd.read_csv(
+                "/home/lumenglin/shihanrui/cluster/test_data_clustered.csv")
+        df = df[df[df.columns[2]] == cluster_num]
+        self.n_samples = df.shape[0]
 
-        self.content = df_train[df_train.columns[0]].tolist()
-        self.label_orig = df_train[df_train.columns[1]].tolist()
+        self.content = df[df.columns[0]].tolist()
+        self.label_orig = df[df.columns[1]].tolist()
 
         label_dict = np.load(
             '/home/lumenglin/shihanrui/reprocessed_data/label_dict_v2.npy', allow_pickle=True).tolist()
         label_dict_reverse = {}
         for key, val in label_dict.items():
             label_dict_reverse[val] = int(key)
-        df_train["label"] = df_train[df_train.columns[1]].map(
+        df["label"] = df[df.columns[1]].map(
             label_dict_reverse)
-        self.label = df_train['label'].tolist()
+        self.label = df['label'].tolist()
 
     # support indexing such that dataset[i] can be used to get i-th sample
     def __getitem__(self, index):
@@ -74,58 +82,78 @@ class Bert(nn.Module):
 
 
 model = Bert().to(device)
+# model = torch.nn.DataParallel(
+#     model, device_ids=device_ids)
+# model = model.cuda(device=device_ids[0])
+
 tokenizer = AutoTokenizer.from_pretrained("hfl/chinese-macbert-base")
 tokenizer.model_max_length = 512
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+step_lr_scheduler = lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
 
 
-def train_model(model, criterion, optimizer, num_epochs=10):
+def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
     since = time.time()
 
     best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
 
     for epoch in range(num_epochs):
-        # print('Epoch {}/{}'.format(epoch, num_epochs - 1))
-        # print('-' * 10)
 
-        running_loss = 0.0
-        running_corrects = 0
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()
+                dataloader = train_loader
+            else:
+                model.eval()
+                dataloader = test_loader
 
-        for i, (contents, labels, label_origs) in enumerate(tqdm(train_loader, desc=f"model{cluster_num} training")):
+            running_loss = 0.0
+            running_corrects = 0
 
-            input_pt = tokenizer(list(contents), return_tensors='pt',
-                                 padding=True, truncation=True).to(device)
-            labels = torch.tensor(list(labels)).to(device)
+            for i, (contents, labels, label_origs) in enumerate(tqdm(dataloader, desc=f"model{cluster_num} training")):
 
-            # Forward pass
-            # track history if only in train
+                input_pt = tokenizer(
+                    list(contents), return_tensors='pt', padding=True)
+                input_pt = input_pt.to(device)
+                labels = torch.tensor(list(labels)).to(device)
 
-            outputs = model(input_pt['input_ids'], input_pt['attention_mask'])
-            _, preds = torch.max(outputs, 1)
-            loss = criterion(outputs, labels)
+                # Forward pass
+                # track history if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs = model(
+                        input_pt['input_ids'], input_pt['attention_mask'])
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
 
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                    # Backward and optimize
+                    if phase == 'train':
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
 
-            running_loss += loss.item() * batch_size
-            running_corrects += torch.sum(preds == labels.data)
+                running_loss += loss.item() * batch_size
+                running_corrects += torch.sum(preds == labels.data)
 
             # if (i+1) % 5 == 0:
             #     print(
             #         f'Epoch: {epoch+1}/{num_epochs}, Step {i+1}/{n_iterations}, loss = {loss.item(): .4f}')
-        epoch_loss = running_loss/len(dataset)
-        epoch_acc = running_corrects.double()/len(dataset)
+            if phase == 'train':
+                scheduler.step()
 
-        print(
-            f'Epoch {epoch+1}/{num_epochs} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+                epoch_loss = running_loss/len(train_dataset)
+                epoch_acc = running_corrects.double()/len(train_dataset)
+            else:
+                epoch_loss = running_loss/len(test_dataset)
+                epoch_acc = running_corrects.double()/len(test_dataset)
 
-        if epoch_acc > best_acc:
-            best_acc = epoch_acc
-            best_model_wts = copy.deepcopy(model.state_dict())
+            print(
+                f'{phase}: Epoch {epoch+1}/{num_epochs} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+
+            if phase == 'val' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
@@ -143,32 +171,28 @@ for cluster_num in range(3):
     print("#####################################")
     print(f"cluster {cluster_num} begin training...")
 
-    dataset = TextDataset(cluster_num)
-    train_loader = DataLoader(dataset=dataset, batch_size=batch_size,
+    train_dataset = TextDataset(cluster_num, 'train')
+    test_dataset = TextDataset(cluster_num, 'test')
+    train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size,
                               shuffle=True, num_workers=2)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size,
+                             shuffle=False, num_workers=2)
+    print('data loaded.')
 
-    total_samples = len(dataset)
+    total_samples = len(train_dataset)
     n_iterations = math.ceil(total_samples/batch_size)
 
-    # examples = iter(train_loader)
-    # examples_contents, examples_labels, _ = examples.next()
-    # print(examples_contents, examples_labels)
-    # sys.exit()
-
-    # writer.add_graph(model)
-    # writer.close()
-    # sys.exit()
-
-    model = train_model(model, criterion, optimizer, num_epochs=20)
+    model = train_model(model, criterion, optimizer,
+                        step_lr_scheduler, num_epochs=40)
 
     FILE = f'./model/model{cluster_num}.pth'
-    torch.save(model.state_dict(), FILE)
-    print(f"model{cluster_num} saved.")
+torch.save(model.state_dict(), FILE)
+print(f"model{cluster_num} saved.")
 
-    # print(model.state_dict())
-    # loaded_model = Bert()
-    # # it takes the loaded dictionary, not the path file itself
-    # loaded_model.load_state_dict(torch.load(FILE))
-    # loaded_model.eval()
+# print(model.state_dict())
+# loaded_model = Bert()
+# # it takes the loaded dictionary, not the path file itself
+# loaded_model.load_state_dict(torch.load(FILE))
+# loaded_model.eval()
 
-    # print(loaded_model.state_dict())
+# print(loaded_model.state_dict())
