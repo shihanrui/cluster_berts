@@ -1,4 +1,4 @@
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -6,21 +6,22 @@ import numpy as np
 import pandas as pd
 import math
 from transformers import AutoTokenizer, AutoModel
-from sklearn.metrics import accuracy_score
+from tqdm import tqdm
+# from sklearn.metrics import accuracy_score
 import time
 import copy
 import sys
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-writer = SummaryWriter("runs/train")
+# writer = SummaryWriter("runs/train")
 
 # Device configuration
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # Hyper-parameters
 num_epochs = 2
-batch_size = 4
+batch_size = 8
 learning_rate = 1e-3
 
 # dataset
@@ -28,18 +29,19 @@ learning_rate = 1e-3
 
 class TextDataset(Dataset):
 
-    def __init__(self):
+    def __init__(self, cluster_num):
 
         # Initialize, download data.
         df_train = pd.read_csv(
-            '/home/hanrui/reprocessed_data/train_data_v2.csv')[:600]
+            'raw_data_clustered.csv')
+        df_train = df_train[df_train[df_train.columns[2]] == cluster_num]
         self.n_samples = df_train.shape[0]
 
         self.content = df_train[df_train.columns[0]].tolist()
         self.label_orig = df_train[df_train.columns[1]].tolist()
 
         label_dict = np.load(
-            '/home/hanrui/reprocessed_data/label_dict_v2.npy', allow_pickle=True).tolist()
+            '/home/lumenglin/shihanrui/reprocessed_data/label_dict_v2.npy', allow_pickle=True).tolist()
         label_dict_reverse = {}
         for key, val in label_dict.items():
             label_dict_reverse[val] = int(key)
@@ -54,19 +56,6 @@ class TextDataset(Dataset):
     # we can call len(dataset) to return the size
     def __len__(self):
         return self.n_samples
-
-
-dataset = TextDataset()
-train_loader = DataLoader(dataset=dataset, batch_size=batch_size,
-                          shuffle=True, num_workers=2)
-
-total_samples = len(dataset)
-n_iterations = math.ceil(total_samples/batch_size)
-
-# examples = iter(train_loader)
-# examples_contents, examples_labels, _ = examples.next()
-# print(examples_contents, examples_labels)
-# sys.exit()
 
 
 class Bert(nn.Module):
@@ -90,10 +79,6 @@ tokenizer.model_max_length = 512
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
-# writer.add_graph(model)
-# writer.close()
-# sys.exit()
-
 
 def train_model(model, criterion, optimizer, num_epochs=10):
     since = time.time()
@@ -108,7 +93,7 @@ def train_model(model, criterion, optimizer, num_epochs=10):
         running_loss = 0.0
         running_corrects = 0
 
-        for i, (contents, labels, label_origs) in enumerate(train_loader):
+        for i, (contents, labels, label_origs) in enumerate(tqdm(train_loader, desc=f"model{cluster_num} training")):
 
             input_pt = tokenizer(list(contents), return_tensors='pt',
                                  padding=True, truncation=True).to(device)
@@ -134,6 +119,7 @@ def train_model(model, criterion, optimizer, num_epochs=10):
             #         f'Epoch: {epoch+1}/{num_epochs}, Step {i+1}/{n_iterations}, loss = {loss.item(): .4f}')
         epoch_loss = running_loss/len(dataset)
         epoch_acc = running_corrects.double()/len(dataset)
+
         print(
             f'Epoch {epoch+1}/{num_epochs} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
 
@@ -152,15 +138,37 @@ def train_model(model, criterion, optimizer, num_epochs=10):
     return model
 
 
-model = train_model(model, criterion, optimizer, num_epochs=5)
+for cluster_num in range(3):
 
-FILE = 'model.pth'
-torch.save(model.state_dict(), FILE)
+    print("#####################################")
+    print(f"cluster {cluster_num} begin training...")
 
-print(model.state_dict())
-loaded_model = Bert()
-# it takes the loaded dictionary, not the path file itself
-loaded_model.load_state_dict(torch.load(FILE))
-loaded_model.eval()
+    dataset = TextDataset(cluster_num)
+    train_loader = DataLoader(dataset=dataset, batch_size=batch_size,
+                              shuffle=True, num_workers=2)
 
-print(loaded_model.state_dict())
+    total_samples = len(dataset)
+    n_iterations = math.ceil(total_samples/batch_size)
+
+    # examples = iter(train_loader)
+    # examples_contents, examples_labels, _ = examples.next()
+    # print(examples_contents, examples_labels)
+    # sys.exit()
+
+    # writer.add_graph(model)
+    # writer.close()
+    # sys.exit()
+
+    model = train_model(model, criterion, optimizer, num_epochs=20)
+
+    FILE = f'./model/model{cluster_num}.pth'
+    torch.save(model.state_dict(), FILE)
+    print(f"model{cluster_num} saved.")
+
+    # print(model.state_dict())
+    # loaded_model = Bert()
+    # # it takes the loaded dictionary, not the path file itself
+    # loaded_model.load_state_dict(torch.load(FILE))
+    # loaded_model.eval()
+
+    # print(loaded_model.state_dict())
