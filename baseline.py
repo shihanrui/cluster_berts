@@ -1,7 +1,8 @@
 # 单gpu
-
+import sys
 import os  # NOQA: E402
 os.environ['CUDA_VISIBLE_DEVICES'] = '2,3,4,5'  # NOQA: E402
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # from torch.utils.tensorboard import SummaryWriter
 import torch
 import torch.nn as nn
@@ -17,8 +18,31 @@ from tqdm import tqdm
 import time
 import copy
 import random
+import logging
+from logging import StreamHandler
+from logging import FileHandler
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+# 标准流处理器，设置的级别为INFO
+stream_handler = StreamHandler()
+stream_handler.setLevel(logging.INFO)
+stream_handler.setFormatter(formatter)
+logger.addHandler(stream_handler)
 
+# 文件处理器，设置的级别为INFO
+
+file_handler = FileHandler(filename="/logs/test.log")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+# logger.debug("this is debug")
+# logger.info("this is info")
+# logger.error("this is error")
+# logger.warning("this is warning")
+# sys.exit()
 def seed_torch(seed=42):
     random.seed(seed)
     os.environ['PYTHONHASHSEED'] = str(seed)
@@ -34,11 +58,11 @@ def seed_torch(seed=42):
 
 seed_torch()
 
-device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # device_ids = [2, 3, 4, 5]
 
 # Hyper-parameters
-num_epochs = 2
+num_epochs = 10
 batch_size = 8
 learning_rate = 1e-5
 
@@ -52,17 +76,17 @@ class TextDataset(Dataset):
         # Initialize, download data.
         if type == 'train':
             df = pd.read_csv(
-                '/home/lumenglin/shihanrui/cluster/train_data_clustered.csv')
+                '/home/shihanrui/data/reprocessed_data/train_data_v2.csv')
         elif type == 'test':
             df = pd.read_csv(
-                "/home/lumenglin/shihanrui/cluster/test_data_clustered.csv")
+                "/home/shihanrui/data/reprocessed_data/test_data_v2.csv")
         self.n_samples = df.shape[0]
 
         self.content = df[df.columns[0]].tolist()
         self.label_orig = df[df.columns[1]].tolist()
 
         label_dict = np.load(
-            '/home/lumenglin/shihanrui/reprocessed_data/label_dict_v2.npy', allow_pickle=True).tolist()
+            '/home/shihanrui/data/reprocessed_data/label_dict_v2.npy', allow_pickle=True).tolist()
         label_dict_reverse = {}
         for key, val in label_dict.items():
             label_dict_reverse[val] = int(key)
@@ -165,7 +189,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 running_corrects += torch.sum(preds == labels.data)
 
             # if (i+1) % 5 == 0:
-            #     print(
+            #     logger.info(
             #         f'Epoch: {epoch+1}/{num_epochs}, Step {i+1}/{n_iterations}, loss = {loss.item(): .4f}')
             if phase == 'train':
                 #     scheduler.step()
@@ -176,7 +200,7 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 epoch_loss = running_loss/len(test_dataset)
                 epoch_acc = running_corrects.double()/len(test_dataset)
 
-            print(
+            logger.info(
                 f'{phase}: Epoch {epoch+1}/{num_epochs} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
 
             if phase == 'val' and epoch_acc > best_acc:
@@ -184,10 +208,10 @@ def train_model(model, criterion, optimizer, scheduler, num_epochs=10):
                 best_model_wts = copy.deepcopy(model.state_dict())
 
     time_elapsed = time.time() - since
-    print('Training complete in {:.0f}m {:.0f}s'.format(
+    logger.info('Training complete in {:.0f}m {:.0f}s'.format(
         time_elapsed // 60, time_elapsed % 60))
-    print('Best val Acc: {:4f}'.format(best_acc))
-    print('Finished Training')
+    logger.info('Best val Acc: {:4f}'.format(best_acc))
+    logger.info('Finished Training')
 
     # load best model weights
     model.load_state_dict(best_model_wts)
@@ -200,22 +224,22 @@ train_loader = DataLoader(dataset=train_dataset, batch_size=batch_size,
                           shuffle=True, num_workers=2)
 test_loader = DataLoader(dataset=test_dataset, batch_size=batch_size,
                          shuffle=False, num_workers=2)
-print('data loaded.')
+logger.info('data loaded.')
 
 total_samples = len(train_dataset)
 n_iterations = math.ceil(total_samples/batch_size)
-print(f"total_samples: {total_samples}, n_iterations:{n_iterations}")
+logger.info(f"total_samples: {total_samples}, n_iterations:{n_iterations}")
 model = train_model(model, criterion, optimizer,
                     step_lr_scheduler, num_epochs=num_epochs)
 
 FILE = f'./model/macbert_finetuned.pth'
 torch.save(model.state_dict(), FILE)
-print(f"macbert_finetuned saved.")
+logger.info(f"macbert_finetuned saved.")
 
-# print(model.state_dict())
+# logger.info(model.state_dict())
 # loaded_model = Bert()
 # # it takes the loaded dictionary, not the path file itself
 # loaded_model.load_state_dict(torch.load(FILE))
 # loaded_model.eval()
 
-# print(loaded_model.state_dict())
+# logger.info(loaded_model.state_dict())
